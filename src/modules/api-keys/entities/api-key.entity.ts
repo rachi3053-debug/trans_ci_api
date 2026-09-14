@@ -14,6 +14,10 @@ export class ApiKey {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
+  @Index()
+  @Column({ type: 'uuid', name: 'tenant_id', nullable: true })
+  tenantId!: string | null;
+
   @Column({ type: 'varchar' })
   name!: string;
 

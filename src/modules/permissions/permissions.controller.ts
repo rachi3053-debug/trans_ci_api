@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import {
@@ -17,7 +18,10 @@ import {
 import { PermissionsService } from './permissions.service';
 import { CreatePermissionDto } from './dto/create-permission.dto';
 import { UpdatePermissionDto } from './dto/update-permission.dto';
+import { PaginationDto } from '../../common/dto/pagination.dto';
 import { Permissions } from '../auth/guards/permissions.decorator';
+import { Audit } from '../../common/decorators/audit.decorator';
+import { AuditAction } from '../audit/entities/audit-log.entity';
 
 @ApiTags('Permissions')
 @ApiBearerAuth()
@@ -27,13 +31,15 @@ export class PermissionsController {
 
   @Get()
   @Permissions('PERMISSION:READ')
-  @ApiOperation({ summary: 'Liste des permissions' })
-  findAll() {
-    return this.permissionsService.findAll();
+  @Audit(AuditAction.READ)
+  @ApiOperation({ summary: 'Liste des permissions (paginée)' })
+  findAll(@Query() pagination: PaginationDto) {
+    return this.permissionsService.findAll(pagination);
   }
 
   @Get(':id')
   @Permissions('PERMISSION:READ')
+  @Audit(AuditAction.READ)
   @ApiOperation({ summary: "Détail d'une permission" })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.permissionsService.findOne(id);
@@ -41,6 +47,7 @@ export class PermissionsController {
 
   @Post()
   @Permissions('PERMISSION:CREATE')
+  @Audit(AuditAction.CREATE)
   @ApiOperation({ summary: 'Créer une permission' })
   @ApiResponse({ status: 201, description: 'Permission créée' })
   @ApiResponse({ status: 409, description: 'Code déjà utilisé' })
@@ -50,6 +57,7 @@ export class PermissionsController {
 
   @Put(':id')
   @Permissions('PERMISSION:UPDATE')
+  @Audit(AuditAction.UPDATE)
   @ApiOperation({ summary: 'Modifier une permission' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -60,7 +68,8 @@ export class PermissionsController {
 
   @Delete(':id')
   @Permissions('PERMISSION:DELETE')
-  @ApiOperation({ summary: 'Supprimer une permission' })
+  @Audit(AuditAction.DELETE)
+  @ApiOperation({ summary: 'Supprimer une permission (soft delete)' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.permissionsService.remove(id);
   }
