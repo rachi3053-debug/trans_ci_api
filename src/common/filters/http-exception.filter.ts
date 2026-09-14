@@ -183,7 +183,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
   private extractHttpMessage(payload: unknown): string {
     if (typeof payload === 'string') return payload;
     if (payload && typeof payload === 'object' && 'message' in payload) {
-      const message = (payload as { message: unknown }).message;
+      const message = payload.message;
       if (typeof message === 'string') return message;
       if (Array.isArray(message) && message.length > 0) {
         return String(message[0]);

@@ -3,6 +3,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUUID,
   MinLength,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -27,8 +28,31 @@ export class CreateUserDto {
   @IsString()
   telephone?: string;
 
-  @ApiProperty({ example: 'MotDePasse123!' })
+  @ApiPropertyOptional({
+    example: 'MotDePasse123!',
+    description:
+      "Mot de passe initial (optionnel). S'il est absent, l'utilisateur est créé en statut INVITED et reçoit un email d'invitation pour définir lui-même son mot de passe.",
+  })
+  @IsOptional()
   @IsString()
   @MinLength(8)
-  password!: string;
+  password?: string;
+
+  @ApiPropertyOptional({
+    example: 'OPERATEUR',
+    description:
+      'Code du rôle à assigner à la création. Sans valeur, le rôle CONSULTATION est attribué par défaut.',
+  })
+  @IsOptional()
+  @IsString()
+  roleCode?: string;
+
+  @ApiPropertyOptional({
+    example: '45a...',
+    description:
+      'Tenant de destination (réservé au ROOT). Sans valeur, le tenant courant est utilisé.',
+  })
+  @IsOptional()
+  @IsUUID()
+  tenantId?: string;
 }
