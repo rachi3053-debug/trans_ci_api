@@ -1,99 +1,226 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# TransCI — API (NestJS)
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Backend de la plateforme TransCI (gestion d'une compagnie de transport interurbain,
+Côte d'Ivoire). NestJS 11, TypeORM 0.3, PostgreSQL.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Stack
 
-## Description
+- NestJS 11, TypeScript strict (`noImplicitAny`, pas de `any` sans justification)
+- TypeORM 0.3 + PostgreSQL (pg), migrations versionnées
+- JWT (passport-jwt), bcrypt, class-validator, Swagger
+- Multi-tenancy : `X-Tenant-Id` / `X-Tenant-Code`, sous-domaine ou query param
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## Démarrage
 
 ```bash
-$ npm install
+npm install
+cp ../.env.example .env        # ou créer .env — ajuster DB_*, JWT_*, etc.
+
+# 1. Appliquer les migrations
+npm run migration:run
+
+# 2. (Recommandé) Charger les données de base
+npm run seed
+
+# 3. Lancer
+npm run start:dev              # http://localhost:3000/api/v1
 ```
 
-## Compile and run the project
+Documentation Swagger : http://localhost:3000/api/v1/docs
 
-```bash
-# development
-$ npm run start
+## Scripts
 
-# watch mode
-$ npm run start:dev
+| Commande | Description |
+|---|---|
+| `npm run start:dev` | Serveur de dev (watch) |
+| `npm run build` | Compilation NestJS |
+| `npm run migration:run` | Applique les migrations |
+| `npm run migration:generate -- <Nom>` | Génère une migration |
+| `npm run migration:revert` | Annule la dernière migration |
+| `npm run seed` | Seed idempotent (tenants, permissions, rôles, utilisateurs, ROOT) |
+| `npm run lint` | ESLint (avec `--fix`) |
+| `npm run test` | Tests unitaires |
 
-# production mode
-$ npm run start:prod
+## Multi-tenancy
+
+Chaque ressource métier (utilisateurs, rôles, permissions, demandes, dossiers…)
+est scopedée à un **tenant**. Un tenant est identifié selon l'ordre de résolution
+suivant (`TenantContextService.resolve`) :
+
+1. Header `X-Tenant-Id` (UUID)
+2. Header `X-Tenant-Code` (libellé court)
+3. Payload JWT (`tenantId` / `tenantCode` dans l'access token)
+4. Sous-domaine (`acme.api.transci-ci.com` → `acme`)
+5. Query param `?tenantId=`
+
+### Garde de protection des routes
+
+```
+ThrottlerGuard → JwtAuthGuard → TenantGuard → PermissionGuard
 ```
 
-## Run tests
+- `@Public()` : route ouverte (login, register, health).
+- `@NoTenant()` : route authentifiée mais sans exigence de tenant.
+- `TenantGuard` : pour les utilisateurs non-ROOT, résout le tenant et le rattache
+  à `request.resolvedTenant`. **Bypass pour ROOT** (accès global, tenant non requis).
+- `PermissionGuard` : vérifie les annotations `@Permissions('CODE')` / `@Roles('X')`.
+  **Bypass pour ROOT**.
 
-```bash
-# unit tests
-$ npm run test
+## Compte ROOT (super-administrateur système)
 
-# e2e tests
-$ npm run test:e2e
+Le **ROOT** est l'ancien compte créé avant le multi-tenancy : `tenant_id = NULL`,
+**aucun tenant**, accès **global** (données de tous les tenants, toutes
+permissions, sans header de tenant).
 
-# test coverage
-$ npm run test:cov
-```
+### Détection
 
-## Deployment
+- Uniquement **par rôle** : lien `user_roles` → rôle `code = 'ROOT'` stocké avec
+  `tenant_id = NULL`.
+- **Jamais** par `tenant_id = NULL` seul : un compte sans tenant n'est pas
+  forcément ROOT. Le backend vérifie toujours le rôle (`isUserRoot`).
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+### Règles
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Cas | Comportement |
+|---|---|
+| ROOT (login) | Rôles `['ROOT']`, permissions = **toutes** les permissions réelles de la table `permissions`, `isRoot: true`, pas de tenant |
+| ROOT (routes) | Bypass TenantGuard + PermissionGuard, services sans filtre tenant (accès global) |
+| Utilisateur normal (login) | Tenant requis : priorité au contexte (header/sous-domaine), sinon `tenant_id` du compte |
+| Utilisateur normal (routes) | Tenant obligatoire + rôles/permissions vérifiés, données scopedées au tenant |
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+> Le frontend teste chaque permission individuellement (`USER:READ`, etc.) : c'est
+> pourquoi le JWT du ROOT contient la **liste complète** des codes de permission
+> et pas un wildcard `*`.
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Configuration
 
-## Resources
+- Adresse du compte ROOT : constante `ROOT_EMAIL` dans `src/database/seed.ts`
+  (défaut `root@transci.com`) — **à adapter à l'email réel du compte existant**.
+- Si le compte n'existe pas, le seed le **crée** avec `Root@1234!`.
+- Si le compte existe, le seed **ne change pas son mot de passe** : il lui
+  assigne le rôle ROOT et met `tenant_id = NULL`.
 
-Check out a few resources that may come in handy when working with NestJS:
+## Comptes créés par le seed
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+| Email | Rôle | Tenant | Mot de passe |
+|---|---|---|---|
+| `root@transci.com` | ROOT | — (global) | `Root@1234!` **si créé par le seed**, sinon d'origine |
+| `admin@transci.com` | ADMIN | DEFAULT | `Admin@1234!` |
 
-## Support
+`admin@transci.com` est un utilisateur **normal** du tenant DEFAULT : il doit
+recevoir/renvoyer un tenant (l'intercepteur frontend le fait automatiquement).
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Module Utilisateurs — fonctionnalités
 
-## Stay in touch
+Le `UsersService` repose sur trois services génériques partagés
+(`CommonModule`) :
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+- **`SearchService`** — recherche plein texte (ILIKE) + pagination `meta`/`links`.
+- **`SoftDeleteService`** — soft delete / restore / hard delete génériques
+  (colonne `deletedAt` + `deletedBy` de `BaseAuditEntity`).
+- **`BulkOperationsService`** — validation des ids et mise à jour en masse.
 
-## License
+### Recherche
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
-# Compagnie_transCI
+- `GET /users` : `search` (nom, prénom, email, téléphone), `role` (code),
+  `actif`, + pagination/tri.
+- `GET /users/deleted` : corbeille (soft-deleted, scopedée au tenant).
+
+### Cycle de vie
+
+- `DELETE /users/:id` : soft delete (marque `deleted_at`, trace `deleted_by`).
+- `POST /users/:id/restore` : restauration.
+- `DELETE /users/:id/hard` : suppression physique, **réservée au ROOT**.
+
+### Rôles
+
+- `POST /users/:id/roles` : remplace les rôles.
+- `DELETE /users/:id/roles` : retire des rôles spécifiques.
+- `POST /users/bulk/assign-roles` / `DELETE /users/bulk/remove-roles` :
+  assignation / retrait en masse.
+
+### Mot de passe
+
+- `POST /users/:id/setup-password` avec `passwordAction` :
+  - `set-password` : admin/ROOT impose un mot de passe ;
+  - `reset-password` : mot de passe provisoire généré si absent (`firstconnexion=true`) ;
+  - `first-login` : l'utilisateur change son mot de passe provisoire (utilisateur
+    ou ROOT uniquement).
+
+### Mot de passe oublié (récupération par email)
+
+- `POST /auth/forgot-password` `{ email }` : réponse **neutre** (pas de fuite
+  d'existence de compte). Un jeton `RESET` (même mécanisme sécurisé que
+  l'activation : SHA-256 en base, lien `${FRONTEND_URL}/auth/reset-password?token=...`,
+  expiration `USER_INVITATION_EXPIRES_IN_HOURS`) est émis et envoyé par email
+  uniquement pour les comptes `ACTIVE`.
+- `POST /auth/reset-password` `{ token, password, confirmPassword }` : vérifie
+  et consomme le jeton de façon atomique, remplace le mot de passe (Argon2id)
+  et révoque les jetons résiduels. Comptes `INVITED`/`SUSPENDED`/`DISABLED`
+  refusés.
+- La table `user_activation_tokens` porte désormais une finalité `purpose`
+  (`ACTIVATION` | `RESET`) : un seul jeton actif par utilisateur **et par
+  finalité**. Nouveaux événements d'audit `PASSWORD_RESET_REQUESTED` /
+  `PASSWORD_RESET_COMPLETED`.
+
+### Réinitialisation par un administrateur
+
+- `POST /users/:id/setup-password` avec `passwordAction=reset-password` (ou
+  `set-password`) : génère un mot de passe provisoire (renvoyé dans
+  `metadata.generatedPassword`) ; l'utilisateur le change ensuite.
+
+### Invitation & activation de compte
+
+Créer un utilisateur **sans mot de passe** (`CreateUserDto.password` optionnel)
+le place en statut `INVITED` (table `users.status`, enum
+`INVITED | ACTIVE | SUSPENDED | DISABLED`) et déclenche l'envoi d'un email
+d'invitation contenant un lien d'activation.
+
+- `POST /users` (sans `password`) : création + invitation. Après validation, un
+  token d'activation est généré et un email envoyé (**après** le commit de la
+  transaction) via `MailModule` (SMTP nodemailer, ou console en dev si `MAIL_*`
+  absents).
+- `GET /auth/activation/validate?token=...` : vérifie le lien (valide, expiré,
+  déjà utilisé). Route publique, sans audit de l'URL.
+- `POST /auth/activation/activate` `{ token, password, confirmPassword }` :
+  l'utilisateur définit son mot de passe → compte `ACTIVE`, `actif=true`,
+  `emailVerified=true`, `firstConnexion=true` ; les autres jetons de l'utilisateur
+  sont révoqués.
+- `POST /users/:id/resend-invitation` (permission `USER:UPDATE`) : renvoie
+  l'email d'un compte encore `INVITED` (cooldown configurable).
+
+Sécurité :
+
+- Seul le **hash SHA-256** du token est stocké (`user_activation_tokens.token_hash`) ;
+  le token brut n'existe que dans l'email (`${FRONTEND_URL}/auth/activate?token=...`).
+- Mot de passe **Argon2id** (`PasswordService`, migration progressive depuis bcrypt).
+- Expiration 24 h (`USER_INVITATION_EXPIRES_IN_HOURS`), cooldown de renvoi
+  60 s (`USER_INVITATION_RESEND_COOLDOWN_SECONDS`), un seul token actif par user.
+- Un compte `INVITED` ne peut pas se connecter (code `USER_NOT_ACTIVATED`).
+
+### Blocage de compte
+
+- `POST /users/:id/lock` (+`reason`) : bloque le compte
+  (`access_locked=true`, `actif=false`), trace un événement.
+- `POST /users/:id/unlock` : débloque et réactive.
+- `GET /users/:id/access-lock-history` : historique paginé des blocages.
+
+### Opérations en masse
+
+`POST /users/bulk/delete` (avec `confirm: true` obligatoire), `POST /users/bulk/restore`,
+`POST /users/bulk/status` (`actif`). Retour standard `{ total, successCount, failedIds }`.
+
+### Protection du compte ROOT
+
+Le compte ROOT ne peut être **désactivé, bloqué, modifié, soft-supprimé ou
+supprimé définitivement** que par le ROOT lui-même. Les opérations sensibles
+(mot de passe, blocage) sont réservées au ROOT, à l'utilisateur concerné ou à un
+ADMIN. La création accepte un `tenantId` de destination **uniquement** pour ROOT.
+
+## Conventions
+
+- La **source de vérité** des règles métier est le backend ; le front n'affiche et
+  ne valide qu'en soutien.
+- Aucun secret en dur : tout passe par `.env` (`JWT_*`, `DB_*`, `PORT`, `API_PREFIX`).
+- Erreurs HTTP standardisées via `HttpExceptionFilter` ; réponses success wrappées
+  dans `{ success, code, message, data }` (`ResponseInterceptor`).

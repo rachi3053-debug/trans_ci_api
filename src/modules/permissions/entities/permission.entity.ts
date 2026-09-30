@@ -1,19 +1,15 @@
-import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  UpdateDateColumn,
-  Index,
-} from 'typeorm';
+import { Entity, Column, Index } from 'typeorm';
+import { BaseAuditEntity } from '../../../common/entities/base-audit.entity';
 
 @Entity('permissions')
-export class Permission {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
+@Index(['code', 'tenantId'], { unique: true, where: '"tenant_id" IS NOT NULL' })
+export class Permission extends BaseAuditEntity {
+  @Index()
+  @Column({ type: 'uuid', name: 'tenant_id', nullable: true })
+  tenantId!: string | null;
 
-  @Index({ unique: true })
-  @Column({ type: 'varchar', unique: true })
+  @Index()
+  @Column({ type: 'varchar' })
   code!: string;
 
   @Column({ type: 'varchar' })
@@ -30,22 +26,4 @@ export class Permission {
 
   @Column({ type: 'boolean', default: true })
   actif!: boolean;
-
-  @CreateDateColumn({ name: 'created_at' })
-  createdAt!: Date;
-
-  @UpdateDateColumn({ name: 'updated_at' })
-  updatedAt!: Date;
-
-  @Column({ type: 'timestamp', name: 'deleted_at', nullable: true })
-  deletedAt!: Date | null;
-
-  @Column({ type: 'varchar', name: 'created_by', nullable: true })
-  createdBy!: string | null;
-
-  @Column({ type: 'varchar', name: 'updated_by', nullable: true })
-  updatedBy!: string | null;
-
-  @Column({ type: 'varchar', name: 'deleted_by', nullable: true })
-  deletedBy!: string | null;
 }

@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import {
@@ -18,7 +19,10 @@ import { RolesService } from './roles.service';
 import { CreateRoleDto } from './dto/create-role.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { AssignPermissionsDto } from './dto/assign-permissions.dto';
+import { PaginationDto } from '../../common/dto/pagination.dto';
 import { Permissions } from '../auth/guards/permissions.decorator';
+import { Audit } from '../../common/decorators/audit.decorator';
+import { AuditAction } from '../audit/entities/audit-log.entity';
 
 @ApiTags('Roles')
 @ApiBearerAuth()
@@ -28,13 +32,15 @@ export class RolesController {
 
   @Get()
   @Permissions('ROLE:READ')
-  @ApiOperation({ summary: 'Liste des rôles' })
-  findAll() {
-    return this.rolesService.findAll();
+  @Audit(AuditAction.READ)
+  @ApiOperation({ summary: 'Liste des rôles (paginée)' })
+  findAll(@Query() pagination: PaginationDto) {
+    return this.rolesService.findAll(pagination);
   }
 
   @Get(':id')
   @Permissions('ROLE:READ')
+  @Audit(AuditAction.READ)
   @ApiOperation({ summary: "Détail d'un rôle" })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.rolesService.findOne(id);
@@ -42,6 +48,7 @@ export class RolesController {
 
   @Post()
   @Permissions('ROLE:CREATE')
+  @Audit(AuditAction.CREATE)
   @ApiOperation({ summary: 'Créer un rôle' })
   @ApiResponse({ status: 201, description: 'Rôle créé' })
   @ApiResponse({ status: 409, description: 'Code déjà utilisé' })
@@ -51,6 +58,7 @@ export class RolesController {
 
   @Put(':id')
   @Permissions('ROLE:UPDATE')
+  @Audit(AuditAction.UPDATE)
   @ApiOperation({ summary: 'Modifier un rôle' })
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateRoleDto) {
     return this.rolesService.update(id, dto);
@@ -58,13 +66,15 @@ export class RolesController {
 
   @Delete(':id')
   @Permissions('ROLE:DELETE')
-  @ApiOperation({ summary: 'Supprimer un rôle' })
+  @Audit(AuditAction.DELETE)
+  @ApiOperation({ summary: 'Supprimer un rôle (soft delete)' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.rolesService.remove(id);
   }
 
   @Post(':id/permissions')
   @Permissions('ROLE:UPDATE')
+  @Audit(AuditAction.UPDATE)
   @ApiOperation({ summary: 'Assigner des permissions à un rôle' })
   assignPermissions(
     @Param('id', ParseUUIDPipe) id: string,
@@ -75,6 +85,7 @@ export class RolesController {
 
   @Get(':id/permissions')
   @Permissions('ROLE:READ')
+  @Audit(AuditAction.READ)
   @ApiOperation({ summary: "Permissions d'un rôle" })
   getRolePermissions(@Param('id', ParseUUIDPipe) id: string) {
     return this.rolesService.getRolePermissions(id);

@@ -4,6 +4,7 @@ import {
   ManyToOne,
   JoinColumn,
   PrimaryColumn,
+  Index,
 } from 'typeorm';
 import { Role } from './role.entity';
 import { Permission } from '../../permissions/entities/permission.entity';
@@ -15,6 +16,10 @@ export class RolePermission {
 
   @PrimaryColumn({ type: 'uuid', name: 'permission_id' })
   permissionId!: string;
+
+  @Index()
+  @Column({ type: 'uuid', name: 'tenant_id', nullable: true })
+  tenantId!: string | null;
 
   @ManyToOne(() => Role, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'role_id' })

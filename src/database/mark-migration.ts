@@ -18,10 +18,10 @@ ds.initialize()
     await ds.query(
       "INSERT INTO migrations (timestamp, name) VALUES (1756000000000, 'CreateAuthTables1756000000000') ON CONFLICT DO NOTHING",
     );
-    console.log('Migration marquee comme faite');
+    process.stdout.write('Migration marquee comme faite\n');
     await ds.destroy();
   })
   .catch((e: Error) => {
-    console.error('Erreur:', e.message);
+    process.stderr.write(`Erreur: ${e.message}\n`);
     process.exit(1);
   });

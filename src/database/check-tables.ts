@@ -13,7 +13,14 @@ const ds = new DataSource({
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
-const TABLES = ['users', 'roles', 'permissions', 'user_roles', 'role_permissions', 'api_keys'];
+const TABLES = [
+  'users',
+  'roles',
+  'permissions',
+  'user_roles',
+  'role_permissions',
+  'api_keys',
+];
 
 ds.initialize()
   .then(async () => {
@@ -25,14 +32,16 @@ ds.initialize()
          ORDER BY ordinal_position`,
         [table],
       );
-      console.log(`\n=== ${table} ===`);
+      process.stdout.write(`\n=== ${table} ===\n`);
       for (const c of cols) {
-        console.log(`  ${c.column_name}: ${c.data_type} ${c.is_nullable === 'YES' ? 'NULL' : 'NOT NULL'} ${c.column_default ? `DEFAULT ${c.column_default}` : ''}`);
+        process.stdout.write(
+          `  ${c.column_name}: ${c.data_type} ${c.is_nullable === 'YES' ? 'NULL' : 'NOT NULL'} ${c.column_default ? `DEFAULT ${c.column_default}` : ''}\n`,
+        );
       }
     }
     await ds.destroy();
   })
   .catch((e: Error) => {
-    console.error('Erreur:', e.message);
+    process.stderr.write(`Erreur: ${e.message}\n`);
     process.exit(1);
   });

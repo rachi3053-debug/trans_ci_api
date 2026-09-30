@@ -7,14 +7,10 @@ import {
 import { Reflector } from '@nestjs/core';
 import { PERMISSIONS_KEY } from './permissions.decorator';
 import { ROLES_KEY } from './roles.decorator';
-
-interface AuthUser {
-  roles?: string[];
-  permissions?: string[];
-}
+import { AuthenticatedUser } from '../strategies/jwt.strategy';
 
 interface RequestWithUser {
-  user?: AuthUser;
+  user?: Partial<AuthenticatedUser>;
 }
 
 @Injectable()
@@ -44,6 +40,11 @@ export class PermissionGuard implements CanActivate {
 
     if (!user) {
       throw new ForbiddenException('Non autorisé');
+    }
+
+    // ROOT : accès total, toutes les permissions
+    if (user.isRoot === true) {
+      return true;
     }
 
     if (requiredRoles && requiredRoles.length > 0) {

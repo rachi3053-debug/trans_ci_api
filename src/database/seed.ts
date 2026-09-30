@@ -1,7 +1,10 @@
+import { Logger } from '@nestjs/common';
 import { config } from 'dotenv';
 import { join } from 'node:path';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+
+const logger = new Logger('Seed');
 
 config({ path: join(__dirname, '..', '..', '.env') });
 
@@ -51,6 +54,13 @@ const ROLES = [
     description: 'Accès en lecture seule',
   },
 ];
+
+/**
+ * Email du compte ROOT (super-administrateur système).
+ * Le ROOT existe AVANT le multi-tenancy : il a tenant_id NULL et accès global.
+ * Adapter cette valeur à l'email réel du compte ROOT existant.
+ */
+const ROOT_EMAIL = 'root@transci.com';
 
 const PERMISSIONS = [
   {
@@ -245,36 +255,63 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
 
 async function seed(): Promise<void> {
   await dataSource.initialize();
-  console.log('Connexion à la base de données...');
+  logger.log('Connexion à la base de données...');
 
   const qr = dataSource.createQueryRunner();
   await qr.connect();
   await qr.startTransaction();
 
   try {
+    // 1. Créer le tenant par défaut
+    const tenantRows = await queryIds(
+      qr,
+      `SELECT "id" FROM "tenants" WHERE "code" = $1`,
+      ['DEFAULT'],
+    );
+
+    let tenantId: string;
+    if (tenantRows.length > 0) {
+      tenantId = tenantRows[0].id;
+      logger.log(`Tenant DEFAULT existant: ${tenantId}`);
+    } else {
+      const result = await queryIds(
+        qr,
+        `INSERT INTO "tenants" ("code", "nom", "is_active")
+         VALUES ($1, $2, $3) RETURNING "id"`,
+        ['DEFAULT', 'TransCI par défaut', true],
+      );
+      tenantId = result[0].id;
+      logger.log(`Tenant DEFAULT créé: ${tenantId}`);
+    }
+
+    // 2. Permissions (avec tenant_id)
     for (const perm of PERMISSIONS) {
       await qr.query(
-        `INSERT INTO "permissions" ("code", "libelle", "module", "action")
-         VALUES ($1, $2, $3, $4) ON CONFLICT ("code") DO NOTHING`,
-        [perm.code, perm.libelle, perm.module, perm.action],
+        `INSERT INTO "permissions" ("code", "libelle", "module", "action", "tenant_id")
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT ("code") DO UPDATE SET "tenant_id" = COALESCE("permissions"."tenant_id", $5)`,
+        [perm.code, perm.libelle, perm.module, perm.action, tenantId],
       );
     }
-    console.log(`${PERMISSIONS.length} permissions créées`);
+    logger.log(`${PERMISSIONS.length} permissions créées`);
 
+    // 3. Rôles (avec tenant_id)
     for (const role of ROLES) {
       await qr.query(
-        `INSERT INTO "roles" ("code", "libelle", "description")
-         VALUES ($1, $2, $3) ON CONFLICT ("code") DO NOTHING`,
-        [role.code, role.libelle, role.description],
+        `INSERT INTO "roles" ("code", "libelle", "description", "tenant_id")
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT ("code") DO UPDATE SET "tenant_id" = COALESCE("roles"."tenant_id", $4)`,
+        [role.code, role.libelle, role.description, tenantId],
       );
     }
-    console.log(`${ROLES.length} rôles créés`);
+    logger.log(`${ROLES.length} rôles créés`);
 
+    // 4. Permissions assignées aux rôles
     for (const [roleCode, permCodes] of Object.entries(ROLE_PERMISSIONS)) {
       const rows = await queryIds(
         qr,
-        `SELECT "id" FROM "roles" WHERE "code" = $1`,
-        [roleCode],
+        `SELECT "id" FROM "roles" WHERE "code" = $1 AND ("tenant_id" = $2 OR "tenant_id" IS NULL)`,
+        [roleCode, tenantId],
       );
       if (rows.length === 0) continue;
       const roleId = rows[0].id;
@@ -282,52 +319,160 @@ async function seed(): Promise<void> {
       for (const permCode of permCodes) {
         const permRows = await queryIds(
           qr,
-          `SELECT "id" FROM "permissions" WHERE "code" = $1`,
-          [permCode],
+          `SELECT "id" FROM "permissions" WHERE "code" = $1 AND ("tenant_id" = $2 OR "tenant_id" IS NULL)`,
+          [permCode, tenantId],
         );
         if (permRows.length === 0) continue;
 
         await qr.query(
-          `INSERT INTO "role_permissions" ("role_id", "permission_id")
-           VALUES ($1, $2) ON CONFLICT ("role_id", "permission_id") DO NOTHING`,
-          [roleId, permRows[0].id],
+          `INSERT INTO "role_permissions" ("role_id", "permission_id", "tenant_id")
+           VALUES ($1, $2, $3)
+           ON CONFLICT ("role_id", "permission_id") DO NOTHING`,
+          [roleId, permRows[0].id, tenantId],
         );
       }
     }
-    console.log('Permissions assignées aux rôles');
+    logger.log('Permissions assignées aux rôles');
 
+    // 5. Utilisateur admin
     const adminPasswordHash = await bcrypt.hash('Admin@1234!', 12);
-    await qr.query(
-      `INSERT INTO "users" ("nom", "prenom", "email", "password", "actif", "email_verified")
-       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT ("email") DO NOTHING`,
-      ['Admin', 'Système', 'admin@transci.com', adminPasswordHash, true, true],
+    const existingAdmin = await queryIds(
+      qr,
+      `SELECT "id" FROM "users" WHERE "email" = $1 AND ("tenant_id" = $2 OR "tenant_id" IS NULL)`,
+      ['admin@transci.com', tenantId],
     );
 
-    const adminRows = await queryIds(
-      qr,
-      `SELECT "id" FROM "users" WHERE "email" = $1`,
-      ['admin@transci.com'],
-    );
-    if (adminRows.length > 0) {
+    if (existingAdmin.length === 0) {
+      const adminResult = await queryIds(
+        qr,
+        `INSERT INTO "users" ("nom", "prenom", "email", "password", "actif", "email_verified", "tenant_id")
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "id"`,
+        [
+          'Admin',
+          'Système',
+          'admin@transci.com',
+          adminPasswordHash,
+          true,
+          true,
+          tenantId,
+        ],
+      );
+
       const roleRows = await queryIds(
         qr,
-        `SELECT "id" FROM "roles" WHERE "code" = 'ADMIN'`,
+        `SELECT "id" FROM "roles" WHERE "code" = 'ADMIN' AND ("tenant_id" = $1 OR "tenant_id" IS NULL)`,
+        [tenantId],
       );
-      if (roleRows.length > 0) {
+      if (roleRows.length > 0 && adminResult.length > 0) {
         await qr.query(
-          `INSERT INTO "user_roles" ("user_id", "role_id")
-           VALUES ($1, $2) ON CONFLICT ("user_id", "role_id") DO NOTHING`,
-          [adminRows[0].id, roleRows[0].id],
+          `INSERT INTO "user_roles" ("user_id", "role_id", "tenant_id")
+           VALUES ($1, $2, $3)
+           ON CONFLICT ("user_id", "role_id") DO NOTHING`,
+          [adminResult[0].id, roleRows[0].id, tenantId],
         );
       }
-      console.log('Utilisateur admin créé: admin@transci.com / Admin@1234!');
+      logger.log('Utilisateur admin créé: admin@transci.com / Admin@1234!');
+    } else {
+      logger.log('Utilisateur admin déjà existant');
+    }
+
+    // 6. Mettre à jour les données existantes sans tenant_id
+    await qr.query(
+      `UPDATE "roles" SET "tenant_id" = $1 WHERE "tenant_id" IS NULL`,
+      [tenantId],
+    );
+    await qr.query(
+      `UPDATE "permissions" SET "tenant_id" = $1 WHERE "tenant_id" IS NULL`,
+      [tenantId],
+    );
+    await qr.query(
+      `UPDATE "user_roles" SET "tenant_id" = $1 WHERE "tenant_id" IS NULL`,
+      [tenantId],
+    );
+    await qr.query(
+      `UPDATE "role_permissions" SET "tenant_id" = $1 WHERE "tenant_id" IS NULL`,
+      [tenantId],
+    );
+    logger.log('Données existantes associées au tenant DEFAULT');
+
+    // 7. Compte ROOT (super-administrateur système)
+    // À créer APRÈS l'étape 6 pour conserver tenant_id = NULL.
+    await qr.query(
+      `INSERT INTO "roles" ("code", "libelle", "description", "tenant_id", "actif")
+       VALUES ($1, $2, $3, NULL, true)
+       ON CONFLICT ("code") DO NOTHING`,
+      [
+        'ROOT',
+        'Super Administrateur',
+        'Accès total au système, tous tenants, toutes permissions',
+      ],
+    );
+    logger.log('Rôle ROOT créé');
+
+    const rootRoleRows = await queryIds(
+      qr,
+      `SELECT "id" FROM "roles" WHERE "code" = 'ROOT'`,
+    );
+    const rootRoleId = rootRoleRows[0]?.id;
+
+    if (rootRoleId) {
+      // Trouver l'ancien utilisateur ROOT existant
+      const rootUserRows = await queryIds(
+        qr,
+        `SELECT "id" FROM "users" WHERE "email" = $1`,
+        [ROOT_EMAIL],
+      );
+
+      let rootUserId: string | undefined;
+
+      if (rootUserRows.length > 0) {
+        rootUserId = rootUserRows[0].id;
+        logger.log(`Utilisateur ROOT existant trouvé: ${ROOT_EMAIL}`);
+      } else {
+        // Créer le ROOT s'il n'existe pas encore
+        const rootHash = await bcrypt.hash('Root@1234!', 12);
+        const rootCreated = await queryIds(
+          qr,
+          `INSERT INTO "users" ("nom", "prenom", "email", "password", "actif", "email_verified", "tenant_id")
+           VALUES ($1, $2, $3, $4, true, true, NULL) RETURNING "id"`,
+          ['Super', 'Administrateur', ROOT_EMAIL, rootHash],
+        );
+        if (rootCreated.length > 0) {
+          rootUserId = rootCreated[0].id;
+          logger.log(`Utilisateur ROOT créé: ${ROOT_EMAIL} / Root@1234!`);
+        }
+      }
+
+      if (rootUserId) {
+        // Le ROOT doit rester GLOBAL : tenant_id = NULL
+        await qr.query(
+          `UPDATE "users" SET "tenant_id" = NULL WHERE "id" = $1`,
+          [rootUserId],
+        );
+
+        // Assigner le rôle ROOT (lien avec tenant_id = NULL)
+        await qr.query(
+          `INSERT INTO "user_roles" ("user_id", "role_id", "tenant_id")
+           VALUES ($1, $2, NULL)
+           ON CONFLICT ("user_id", "role_id") DO NOTHING`,
+          [rootUserId, rootRoleId],
+        );
+
+        // Nettoyer les liens d'anciens rôles du ROOT (il n'en a pas besoin)
+        await qr.query(
+          `DELETE FROM "user_roles" WHERE "user_id" = $1 AND "role_id" <> $2`,
+          [rootUserId, rootRoleId],
+        );
+
+        logger.log(`Compte ROOT configuré: ${ROOT_EMAIL} (tenant_id = NULL)`);
+      }
     }
 
     await qr.commitTransaction();
-    console.log('Seed terminé avec succès');
+    logger.log('Seed terminé avec succès');
   } catch (error) {
     await qr.rollbackTransaction();
-    console.error('Erreur lors du seed:', error);
+    logger.error('Erreur lors du seed:', error);
     throw error;
   } finally {
     await qr.release();
