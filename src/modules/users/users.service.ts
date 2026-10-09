@@ -1,6 +1,6 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, FindOptionsWhere } from 'typeorm';
+import { Repository, In, IsNull, FindOptionsWhere } from 'typeorm';
 import { randomBytes } from 'node:crypto';
 import { User, UserStatus } from './entities/user.entity';
 import { UserRole } from './entities/user-role.entity';
@@ -174,18 +174,89 @@ export class UsersService {
   }
 
   /**
-   * Résout les rôles demandés dans le scope d'un tenant donné.
-   * TypeORM ignore les conditions `undefined` : tenantId null (ROOT) = rôle global.
+   * Tenant cible obligatoire pour toute attribution de rôle.
+   *
+   * Un `tenantId` nul ou vide signifie « pas de tenant », c'est-à-dire des
+   * rôles globaux (`tenant_id IS NULL`, cas du rôle ROOT). L'attribution de ce
+   * type de rôle étant interdite, on refuse EXPLICITEMENT (403) au lieu
+   * d'omettre silencieusement le filtre tenant et de renvoyer arbitrairement
+   * des rôles hors périmètre.
+   */
+  private requireTenantScopeForRoles(tenantId: string | null): string {
+    if (!tenantId) {
+      this.messageService.throwBusiness(
+        MessageCode.ACCESS_DENIED,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+    return tenantId;
+  }
+
+  /**
+   * Résout les rôles demandés dans le scope EXACT d'un tenant donné.
+   *
+   * Garde-fous multi-tenant (défense en profondeur, aucun chemin ne dépend
+   * d'un filtrage indirect) :
+   * 1. le tenant est obligatoire : sans tenant, seule une résolution « globale »
+   *    serait possible, or elle est interdite → 403 ACCESS_DENIED ;
+   * 2. un code demandé qui correspond à un rôle global (`tenant_id IS NULL`,
+   *    ex. ROOT) est refusé explicitement → 403, et non remonté comme
+   *    « introuvable » (404) ;
+   * 3. le filtre `tenantId` est appliqué SANS condition (plus de
+   *    `if (tenantId) where.tenantId = ...`) ;
+   * 4. les lignes retournées sont ré-validées côté tenant : une colonne
+   *    `tenant_id` NULL en base malgré un tenant fourni est refusée → 403.
+   *
+   * AUCUNE hiérarchie de rôles n'est évaluée ici : cette méthode résout des
+   * rôles, elle ne compare pas des rangs (traitée dans une tâche dédiée).
+   *
+   * @param roleRepo dépôt à utiliser (celui de la transaction si elle existe).
    */
   private async resolveRoles(
     roleCodes: string[],
     tenantId: string | null,
+    roleRepo: Repository<Role> = this.roleRepo,
   ): Promise<Role[]> {
-    const where: FindOptionsWhere<Role> = { code: In(roleCodes) };
-    if (tenantId) where.tenantId = tenantId;
-    const roles = await this.roleRepo.find({ where });
+    const targetTenantId = this.requireTenantScopeForRoles(tenantId);
+    const codes = Array.from(new Set(roleCodes));
+
+    // 2. Rôle global demandé (ROOT par défaut) : refus explicite, systématique.
+    //    La requête est volontairement inconditionnelle afin qu'une éventuelle
+    //    existence homonyme dans un tenant ne masque jamais le rôle global.
+    const globalRoles = await roleRepo.find({
+      where: { code: In(codes), tenantId: IsNull() },
+    });
+    if (globalRoles.length > 0) {
+      this.logger.warn(
+        `Attribution de rôle(s) global(aux) refusée [${globalRoles
+          .map((r) => r.code)
+          .join(', ')}] - acteur ${this.actorId ?? 'anonyme'}`,
+      );
+      this.messageService.throwBusiness(
+        MessageCode.ACCESS_DENIED,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+
+    // 3. Résolution strictement bornée au tenant demandé.
+    const roles = await roleRepo.find({
+      where: { code: In(codes), tenantId: targetTenantId },
+    });
+
+    // 4. Revendication du tenant des rôles retournés.
+    const outOfScope = roles.find((r) => r.tenantId !== targetTenantId);
+    if (outOfScope) {
+      this.logger.error(
+        `Rôle ${outOfScope.code} hors tenant attendu - résolution interrompue`,
+      );
+      this.messageService.throwBusiness(
+        MessageCode.ACCESS_DENIED,
+        HttpStatus.FORBIDDEN,
+      );
+    }
+
     const found = new Set(roles.map((r) => r.code));
-    const missing = roleCodes.find((c) => !found.has(c));
+    const missing = codes.find((c) => !found.has(c));
     if (missing) {
       this.messageService.throwBusiness(
         MessageCode.ROLE_NOT_FOUND,
@@ -195,18 +266,25 @@ export class UsersService {
     return roles;
   }
 
+  /**
+   * Crée les liens `user_roles`, sans doublon : la clé primaire est
+   * (user_id, role_id), insérer deux fois le même rôle ferait échouer toute
+   * la transaction.
+   */
   private async linkRoles(
     userId: string,
     roles: Role[],
     tenantId: string | null,
+    userRoleRepo: Repository<UserRole> = this.userRoleRepo,
   ): Promise<void> {
-    for (const role of roles) {
-      const ur = this.userRoleRepo.create({
+    const uniqueRoles = new Map(roles.map((role) => [role.id, role]));
+    for (const role of uniqueRoles.values()) {
+      const ur = userRoleRepo.create({
         userId,
         roleId: role.id,
         tenantId,
       });
-      await this.userRoleRepo.save(ur);
+      await userRoleRepo.save(ur);
     }
   }
 
@@ -216,15 +294,17 @@ export class UsersService {
   private async deleteRoleLinks(
     userId: string,
     roleCodes: string[],
+    userRoleRepo: Repository<UserRole> = this.userRoleRepo,
+    roleRepo: Repository<Role> = this.roleRepo,
   ): Promise<void> {
-    await this.userRoleRepo
+    await userRoleRepo
       .createQueryBuilder()
       .delete()
       .from(UserRole)
       .where('user_role.userId = :userId', { userId })
       .andWhere(
         'user_role.roleId IN (' +
-          this.roleRepo
+          roleRepo
             .createQueryBuilder('role')
             .select('role.id')
             .where('role.code IN (:...codes)', { codes: roleCodes })
@@ -232,6 +312,57 @@ export class UsersService {
           ')',
       )
       .execute();
+  }
+
+  /**
+   * Remplace l'intégralité des rôles d'un utilisateur de façon ATOMIQUE.
+   *
+   * Ordre imposé : résolution des rôles → suppression des anciens liens →
+   * insertion des nouveaux, le tout dans UNE seule transaction. Si la
+   * résolution échoue (code inconnu, rôle global refusé) ou si une écriture
+   * SQL échoue, le rollback restaure l'état initial : l'utilisateur ne peut
+   * jamais se retrouver sans rôle, et les rôles précédents restent intacts.
+   */
+  private async replaceRolesAtomically(
+    userId: string,
+    roleCodes: string[],
+    tenantId: string | null,
+  ): Promise<Role[]> {
+    const targetTenantId = this.requireTenantScopeForRoles(tenantId);
+
+    return this.userRoleRepo.manager.transaction(async (manager) => {
+      const roleRepo = manager.getRepository(Role);
+      const userRoleRepo = manager.getRepository(UserRole);
+
+      // Résolution AVANT toute écriture : un échec ici n'a encore rien touché.
+      const roles = await this.resolveRoles(
+        roleCodes,
+        targetTenantId,
+        roleRepo,
+      );
+
+      await userRoleRepo.delete({ userId });
+      await this.linkRoles(userId, roles, targetTenantId, userRoleRepo);
+
+      return roles;
+    });
+  }
+
+  /**
+   * Retire des rôles de façon ATOMIQUE (voir `replaceRolesAtomically`).
+   */
+  private async removeRolesAtomically(
+    userId: string,
+    roleCodes: string[],
+  ): Promise<void> {
+    await this.userRoleRepo.manager.transaction(async (manager) => {
+      await this.deleteRoleLinks(
+        userId,
+        roleCodes,
+        manager.getRepository(UserRole),
+        manager.getRepository(Role),
+      );
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -579,6 +710,11 @@ export class UsersService {
 
   /**
    * Remplace tous les rôles d'un utilisateur.
+   *
+   * Atomique : résolution → suppression → insertion dans une transaction.
+   * Un code de rôle inexistant (404) ou un rôle global (403) laisse les rôles
+   * précédents INTACTS — il n'existe plus de fenêtre où l'utilisateur serait
+   * privé de ses rôles après un échec.
    */
   async assignRoles(
     id: string,
@@ -587,9 +723,7 @@ export class UsersService {
     const user = await this.getUserOrThrow(id);
     await this.assertNotRootTarget(id);
 
-    await this.userRoleRepo.delete({ userId: id });
-    const roles = await this.resolveRoles(dto.roleCodes, user.tenantId);
-    await this.linkRoles(id, roles, user.tenantId);
+    await this.replaceRolesAtomically(id, dto.roleCodes, user.tenantId);
 
     const [safe] = await this.attachRoles([user]);
     return this.messageService.success(MessageCode.USER_ROLES_UPDATED, safe);
@@ -597,6 +731,10 @@ export class UsersService {
 
   /**
    * Retire des rôles spécifiques sans toucher aux autres.
+   *
+   * Atomique : exécution dans une transaction (le DELETE unique l'est déjà au
+   * niveau SQL, la transaction garantit la même propriété si l'opération
+   * évolue vers plusieurs requêtes).
    */
   async removeRoles(
     id: string,
@@ -614,7 +752,7 @@ export class UsersService {
       );
     }
 
-    await this.deleteRoleLinks(id, dto.roleCodes);
+    await this.removeRolesAtomically(id, dto.roleCodes);
 
     const [safe] = await this.attachRoles([user]);
     return this.messageService.success(MessageCode.USER_ROLES_UPDATED, safe);
@@ -856,30 +994,63 @@ export class UsersService {
   // Opérations en masse
   // ---------------------------------------------------------------------------
 
+  /**
+   * Assignation de rôles en masse.
+   *
+   * Sémantique retenue : ATOMICITÉ PAR CIBLE (et non tout-ou-rien par lot).
+   * Raison : le contrat de retour `{ total, successCount, failedIds, message }`
+   * décrit un résultat PARTIEL par cible ; un tout-ou-rien par lot rendrait
+   * `failedIds` inutile (il faudrait faire échouer tout le lot) et
+   * contredirait le contrat de réponse inchangé.
+   *
+   * Déroulé :
+   * - Phase 1 (aucune mutation) : pour chaque cible, contrôles d'existence /
+   *   cible ROOT + résolution des rôles demandés. Un échec place simplement la
+   *   cible dans `failedIds`, sans toucher à `user_roles`.
+   * - Phase 2 : chaque cible valide est réécrite dans SA PROPRE transaction
+   *   (`replaceRolesAtomically`). Un échec est intégralement annulé et n'affecte
+   *   que cette cible ; les autres cibles ne sont jamais dégradées.
+   * `failedIds` est réordonné selon `dto.ids` pour rester lisible.
+   */
   async bulkAssignRoles(
     dto: BulkAssignRolesDto,
   ): Promise<ApiResponse<BulkOperationResultDto>> {
-    let successCount = 0;
-    const failedIds: string[] = [];
+    const failed = new Set<string>();
+    const targets: Array<{ id: string; tenantId: string | null }> = [];
 
+    // Phase 1 : validation + résolution pour TOUTES les cibles, sans écriture.
     for (const id of dto.ids) {
       try {
         const user = await this.getUserOrThrow(id);
         await this.assertNotRootTarget(id);
-        const roles = await this.resolveRoles(dto.roleCodes, user.tenantId);
-        await this.userRoleRepo.delete({ userId: id });
-        await this.linkRoles(id, roles, user.tenantId);
+        await this.resolveRoles(dto.roleCodes, user.tenantId);
+        targets.push({ id, tenantId: user.tenantId });
+      } catch {
+        // La cible est signalée en échec ; son état reste inchangé.
+        failed.add(id);
+      }
+    }
+
+    // Phase 2 : mutation atomique, cible par cible.
+    let successCount = 0;
+    for (const target of targets) {
+      try {
+        await this.replaceRolesAtomically(
+          target.id,
+          dto.roleCodes,
+          target.tenantId,
+        );
         successCount += 1;
       } catch {
-        // L'id est suivi comme échec pour un rapport de résultat en masse.
-        failedIds.push(id);
+        // Rollback assuré par la transaction : aucun rôle à moitié écrit.
+        failed.add(target.id);
       }
     }
 
     const result = this.bulkOperationsService.buildResult(
       dto.ids.length,
       successCount,
-      failedIds,
+      dto.ids.filter((id) => failed.has(id)),
       'Rôles assignés en masse.',
     );
     return this.messageService.success(MessageCode.USERS_BULK_UPDATED, result);
@@ -887,12 +1058,20 @@ export class UsersService {
 
   /**
    * Retire des rôles en masse d'un ensemble d'utilisateurs.
+   *
+   * Atomicité : le retrait est une seule requête DELETE par cible, déjà
+   * atomique au niveau PostgreSQL — un échec ne laisse donc jamais `user_roles`
+   * dans un état intermédiaire. Contrairement à `bulkAssignRoles`, il n'y a pas
+   * de phase destructive suivie d'une phase d'insertion à protéger, donc
+   * aucune transaction enveloppante n'est nécessaire par cible.
+   * Le rapport conserve la même sémantique qu'`bulkAssignRoles` : résultat
+   * partiel par cible, `failedIds` dans l'ordre des ids demandés.
    */
   async bulkRemoveRoles(
     dto: BulkAssignRolesDto,
   ): Promise<ApiResponse<BulkOperationResultDto>> {
     let successCount = 0;
-    const failedIds: string[] = [];
+    const failed = new Set<string>();
 
     for (const id of dto.ids) {
       try {
@@ -902,21 +1081,21 @@ export class UsersService {
           dto.roleCodes.includes('ROOT') &&
           (await this.isRootUser(id))
         ) {
-          failedIds.push(id);
+          failed.add(id);
           continue;
         }
         await this.deleteRoleLinks(id, dto.roleCodes);
         successCount += 1;
       } catch {
         // L'id est suivi comme échec pour un rapport de résultat en masse.
-        failedIds.push(id);
+        failed.add(id);
       }
     }
 
     const result = this.bulkOperationsService.buildResult(
       dto.ids.length,
       successCount,
-      failedIds,
+      dto.ids.filter((id) => failed.has(id)),
       'Rôles retirés en masse.',
     );
     return this.messageService.success(MessageCode.USERS_BULK_UPDATED, result);

@@ -38,7 +38,6 @@ export class RolesService {
       .createQueryBuilder('role')
       .where('role.deletedAt IS NULL');
 
-    // ROOT : accès à tous les rôles de tous les tenants. Sinon : filter par tenant.
     if (!isRoot && tenantId) {
       qb.andWhere('role.tenantId = :tenantId', { tenantId });
     }

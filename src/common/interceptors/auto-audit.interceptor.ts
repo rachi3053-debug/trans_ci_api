@@ -8,8 +8,9 @@ import {
 import { Observable, tap } from 'rxjs';
 import { Request } from 'express';
 import { Reflector } from '@nestjs/core';
+import { DataSource } from 'typeorm';
 import { AuditService } from '../../modules/audit/audit.service';
-import { AuditAction } from '../../modules/audit/entities/audit-log.entity';
+import { AuditLog, AuditAction } from '../../modules/audit/entities/audit-log.entity';
 
 export const AUDIT_KEY = 'audit_action';
 export const AUDIT_SKIP_KEY = 'audit_skip';
@@ -68,6 +69,7 @@ export class AutoAuditInterceptor implements NestInterceptor {
   constructor(
     private readonly auditService: AuditService,
     private readonly reflector: Reflector,
+    private readonly dataSource: DataSource,
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -131,27 +133,42 @@ export class AutoAuditInterceptor implements NestInterceptor {
         ? lastSegment
         : undefined;
 
-    this.auditService
-      .log({
-        userId: user?.id,
-        userEmail: user?.email,
-        entityType,
-        entityId,
-        action,
-        description: error
-          ? `${action} failed after ${duration}ms: ${error instanceof Error ? error.message : String(error)}`
-          : `${action} completed in ${duration}ms`,
-        ipAddress: request.ip,
-        userAgent: request.get('user-agent'),
-        metadata: {
-          method: request.method,
-          url: request.url,
-          statusCode: error ? 500 : undefined,
-          duration,
-        },
-      })
-      .catch((err) => {
+    // Utiliser un QueryRunner séparé pour l'audit (transaction indépendante).
+    // L'audit ne doit pas être exécuté dans la même transaction que le login,
+    // sinon un échec d'audit annulerait le login. De plus, on loggue l'erreur
+    // PostgreSQL complète au lieu de la masquer avec un .catch() silencieux.
+    const queryRunner = this.dataSource.createQueryRunner();
+
+    queryRunner
+      .connect()
+      .then(() => queryRunner.startTransaction())
+      .then(() =>
+        queryRunner.manager.save(AuditLog, {
+          userId: user?.id ?? null,
+          userEmail: user?.email ?? null,
+          entityType,
+          entityId: entityId ?? null,
+          action,
+          description: error
+            ? `${action} failed after ${duration}ms: ${error instanceof Error ? error.message : String(error)}`
+            : `${action} completed in ${duration}ms`,
+          ipAddress: request.ip ?? null,
+          userAgent: request.get('user-agent') ?? null,
+          metadata: {
+            method: request.method,
+            url: request.url,
+            statusCode: error ? 500 : undefined,
+            duration,
+          },
+        }),
+      )
+      .then(() => queryRunner.commitTransaction())
+      .catch(async (err) => {
+        // Logguer l'erreur PostgreSQL originale pour diagnostic
         this.logger.error('Échec écriture audit log', err);
-      });
+        // Ne pas propager l'erreur pour ne pas affecter le login
+        await queryRunner.rollbackTransaction();
+      })
+      .finally(() => queryRunner.release());
   }
 }

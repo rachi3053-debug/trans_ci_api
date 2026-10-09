@@ -201,6 +201,30 @@ const PERMISSIONS = [
     module: 'RAPPORT',
     action: 'EXPORT',
   },
+  {
+    code: 'VILLE:READ',
+    libelle: 'Consulter les villes',
+    module: 'VILLE',
+    action: 'READ',
+  },
+  {
+    code: 'VILLE:CREATE',
+    libelle: 'Créer une ville',
+    module: 'VILLE',
+    action: 'CREATE',
+  },
+  {
+    code: 'VILLE:UPDATE',
+    libelle: 'Modifier une ville',
+    module: 'VILLE',
+    action: 'UPDATE',
+  },
+  {
+    code: 'VILLE:DELETE',
+    libelle: 'Supprimer une ville',
+    module: 'VILLE',
+    action: 'DELETE',
+  },
 ];
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
@@ -240,6 +264,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     'DOSSIER:UPDATE',
     'RAPPORT:READ',
     'RAPPORT:EXPORT',
+    'VILLE:READ',
   ],
   OPERATEUR: [
     'DEMANDE:READ',
@@ -249,9 +274,31 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     'DOSSIER:CREATE',
     'DOSSIER:UPDATE',
     'RAPPORT:READ',
+    'VILLE:READ',
   ],
-  CONSULTATION: ['DEMANDE:READ', 'DOSSIER:READ', 'RAPPORT:READ'],
+  CONSULTATION: [
+    'DEMANDE:READ',
+    'DOSSIER:READ',
+    'RAPPORT:READ',
+    'VILLE:READ',
+  ],
 };
+
+/**
+ * Les villes sont une RÉFÉRENCE GLOBALE partagée par tous les tenants.
+ *
+ * `VILLE:READ` est accordée à tous les rôles, y compris `CONSULTATION` : une
+ * ville est une donnée de consultation, pas une donnée de gestion. C'est aussi
+ * ce qui permet aux modules métier à venir (gares, trajets) de résoudre une
+ * ville sans dépendre d'un rôle particulier.
+ *
+ * `VILLE:CREATE`, `VILLE:UPDATE` et `VILLE:DELETE` ne sont délibérément
+ * accordées à AUCUN rôle. L'écriture est réservée au ROOT, contrôle appliqué
+ * côté serveur par `VilleService.assertGlobalReferenceWriter` et non par une
+ * permission — que `PermissionGuard` ne vérifie de toute façon pas pour le ROOT
+ * (bypass `isRoot`). Ne pas les ajouter ici : la liste ci-dessus est un
+ * registre de droits effectivement accordés.
+ */
 
 async function seed(): Promise<void> {
   await dataSource.initialize();

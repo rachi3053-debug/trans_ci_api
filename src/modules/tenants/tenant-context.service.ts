@@ -2,29 +2,54 @@ import { Injectable, Scope, UnauthorizedException } from '@nestjs/common';
 import { REQUEST } from '@nestjs/core';
 import { Inject } from '@nestjs/common';
 import type { Request } from 'express';
-import { JwtPayload, AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { ResolvedTenant } from './tenant.guard';
 
 /**
- * Résolution multi-tenant inspirée du pattern efarmOS.
+ * Origine de la valeur de tenant exposée par le contexte.
+ * - `guard` : tenant validé par `TenantGuard` (existence + activation en base).
+ * - `jwt`   : tenant porté par le jeton d'accès, non résolu par le guard
+ *             (route `@NoTenant()`).
+ * - `header`: requête anonyme (`@Public()`) — seuls les en-têtes X-Tenant-Id /
+ *             X-Tenant-Code sont alors lus (flux d'inscription).
+ * - `conflict`: le tenant résolu par le guard diverge du JWT (situation anormale
+ *             déjà refusée par le guard) : le JWT reste prioritaire et
+ *             `getTenantId()` lève une exception (fail-closed).
+ * - `none`   : aucun tenant exploitable.
+ */
+export type TenantContextSource =
+  'guard' | 'jwt' | 'header' | 'conflict' | 'none';
+
+/**
+ * Contexte tenant de la requête (scope REQUEST).
  *
- * Priorité de résolution :
- * 1. Tenant résolu par TenantGuard (request.resolvedTenant)
- * 2. Header X-Tenant-Id ou X-Tenant-Code
- * 3. JWT payload (tenantId / tenantCode)
- * 4. Sous-domaine de la requête
- * 5. Query param ?tenantId=
+ * Sources retenues, par ordre d'autorité décroissante :
+ * 1. `request.resolvedTenant` — validé par `TenantGuard`, qui n'accepte pour un
+ *    non ROOT que le tenant porté par le JWT.
+ * 2. `request.user.tenantId` / `tenantCode` — revendication du JWT.
+ * 3. Headers `X-Tenant-Id` / `X-Tenant-Code` — requêtes **anonymes** uniquement
+ *    (`@Public()`, ex. `/auth/register`), faute d'identité à laquelle rattacher
+ *    un tenant.
  *
- * Scope REQUEST : une instance par requête HTTP.
+ * Le query param `?tenantId=` et le sous-domaine du header `Host` ne sont plus
+ * exploités : vecteurs d'injection (partage de liens, journaux d'accès,
+ * en-tête `Referer`) et contournables par n'importe quel client.
  */
 @Injectable({ scope: Scope.REQUEST })
 export class TenantContextService {
   private _tenantId: string | null = null;
   private _tenantCode: string | null = null;
+  private _source: TenantContextSource = 'none';
+  private _conflict = false;
 
   constructor(@Inject(REQUEST) private readonly request: Request) {
     this.resolve();
   }
 
+  /**
+   * Tenant effectif de la requête. Ne peut provenir que d'une source validée
+   * (guard, JWT, ou en-tête sur une requête anonyme).
+   */
   get tenantId(): string | null {
     return this._tenantId;
   }
@@ -37,13 +62,25 @@ export class TenantContextService {
     return this._tenantId !== null;
   }
 
+  /** Origine de la valeur de tenant (traçabilité / diagnostic). */
+  get source(): TenantContextSource {
+    return this._source;
+  }
+
+  /**
+   * Tenant tel que revendiqué par le jeton d'accès (null si non authentifié ou
+   * ROOT). Sert de référence pour comparer le tenant résolu par le guard.
+   */
+  get jwtTenantId(): string | null {
+    return this.user?.tenantId ?? null;
+  }
+
   /**
    * Indique si l'utilisateur courant est ROOT (super-administrateur système
    * avec accès global, sans tenant obligatoire).
    */
   get isRoot(): boolean {
-    const user = this.request.user as AuthenticatedUser | undefined;
-    return user?.isRoot === true;
+    return this.user?.isRoot === true;
   }
 
   /**
@@ -51,15 +88,19 @@ export class TenantContextService {
    * Utilisé pour la traçabilité (created_by / updated_by / deleted_by).
    */
   get userId(): string | null {
-    const user = this.request.user as AuthenticatedUser | undefined;
-    return user?.id ?? null;
+    return this.user?.id ?? null;
   }
 
   getTenantId(): string | null {
     if (this.isRoot) return null;
+    if (this._conflict) {
+      throw new UnauthorizedException(
+        'Contexte tenant incohérent : le tenant de la requête ne correspond pas à votre compte.',
+      );
+    }
     if (!this._tenantId) {
       throw new UnauthorizedException(
-        'Tenant non résolu. Fournissez X-Tenant-Id ou X-Tenant-Code.',
+        'Tenant non résolu. Aucun tenant n’est associé à votre compte.',
       );
     }
     return this._tenantId;
@@ -67,69 +108,96 @@ export class TenantContextService {
 
   getTenantCode(): string | null {
     if (this.isRoot) return null;
+    if (this._conflict) {
+      throw new UnauthorizedException(
+        'Contexte tenant incohérent : le tenant de la requête ne correspond pas à votre compte.',
+      );
+    }
     if (!this._tenantCode) {
       throw new UnauthorizedException(
-        'Tenant non résolu. Fournissez X-Tenant-Id ou X-Tenant-Code.',
+        'Tenant non résolu. Aucun tenant n’est associé à votre compte.',
       );
     }
     return this._tenantCode;
   }
 
-  private resolve(): void {
-    // 0. Tenant déjà résolu par TenantGuard
-    const resolved = (
-      this.request as Request & {
-        resolvedTenant?: { id: string; code: string };
-      }
-    ).resolvedTenant;
-    if (resolved) {
-      this._tenantId = resolved.id;
-      this._tenantCode = resolved.code;
-      return;
-    }
-
-    // 1. Header X-Tenant-Id ou X-Tenant-Code
-    const headerId = this.request.headers['x-tenant-id'];
-    const headerCode = this.request.headers['x-tenant-code'];
-    if (headerId && typeof headerId === 'string') {
-      this._tenantId = headerId;
-      return;
-    }
-    if (headerCode && typeof headerCode === 'string') {
-      this._tenantCode = headerCode;
-      return;
-    }
-
-    // 2. JWT payload
-    const user = this.request.user as
-      (JwtPayload & { tenantId?: string; tenantCode?: string }) | undefined;
-    if (user?.tenantId) {
-      this._tenantId = user.tenantId;
-      return;
-    }
-    if (user?.tenantCode) {
-      this._tenantCode = user.tenantCode;
-      return;
-    }
-
-    // 3. Sous-domaine
-    const host = this.request.get('host') ?? '';
-    const subdomain = host.split('.')[0];
-    if (subdomain && subdomain !== 'www' && subdomain !== 'api') {
-      this._tenantCode = subdomain;
-      return;
-    }
-
-    // 4. Query param
-    const queryTenantId = this.request.query?.tenantId;
-    if (queryTenantId && typeof queryTenantId === 'string') {
-      this._tenantId = queryTenantId;
-      return;
-    }
-  }
-
+  /**
+   * Rattache explicitement un tenant au contexte (réservé au code de confiance :
+   * la valeur doit provenir de `TenantService`).
+   */
   setTenant(id: string, code: string): void {
     this._tenantId = id;
     this._tenantCode = code;
+    this._source = 'guard';
+    this._conflict = false;
+  }
+
+  private get user(): AuthenticatedUser | undefined {
+    return this.request.user as AuthenticatedUser | undefined;
+  }
+
+  private resolve(): void {
+    const resolved = (
+      this.request as Request & { resolvedTenant?: ResolvedTenant }
+    ).resolvedTenant;
+    const user = this.user;
+
+    // 1. Tenant validé par le TenantGuard (source de référence).
+    if (resolved) {
+      if (!user || user.isRoot === true || !user.tenantId) {
+        this._tenantId = resolved.id;
+        this._tenantCode = resolved.code;
+        this._source = 'guard';
+        return;
+      }
+      if (resolved.id === user.tenantId) {
+        this._tenantId = resolved.id;
+        this._tenantCode = resolved.code;
+        this._source = 'guard';
+        return;
+      }
+      // Situation anormale (guard contourné) : le JWT reste prioritaire et le
+      // contexte est marqué en conflit pour que les getters stricts lèvent.
+      this._tenantId = user.tenantId;
+      this._tenantCode = user.tenantCode ?? null;
+      this._source = 'conflict';
+      this._conflict = true;
+      return;
+    }
+
+    // 2. ROOT : accès global, aucun tenant implicite.
+    if (user?.isRoot === true) return;
+
+    // 3. Tenant du JWT (route @NoTenant() : le guard n'a rien résolu).
+    if (user) {
+      this._tenantId = user.tenantId ?? null;
+      this._tenantCode = user.tenantCode ?? null;
+      this._source = user.tenantId ? 'jwt' : 'none';
+      return;
+    }
+
+    // 4. Requête anonyme (@Public) : en-têtes uniquement, pour le tenant cible.
+    //    Aucune identité n'étant vérifiable, il ne s'agit pas d'un contournement
+    //    d'isolation (cf. décision documentée : l'inscription publique reste
+    //    ouverte, à encadrer via une invitation).
+    const headerId = this.readHeader('x-tenant-id');
+    if (headerId) {
+      this._tenantId = headerId;
+      this._source = 'header';
+      return;
+    }
+    const headerCode = this.readHeader('x-tenant-code');
+    if (headerCode) {
+      this._tenantCode = headerCode;
+      this._source = 'header';
+    }
+  }
+
+  private readHeader(name: string): string | null {
+    const value = this.request.headers[name];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+    return null;
   }
 }

@@ -147,16 +147,22 @@ export class AuthService {
       roles = ['ROOT'];
       permissions = await this.getAllPermissions();
     } else {
-      // Utilisateur normal : tenant obligatoire.
-      // Priorité au contexte (header/sous-domaine), sinon tenant du compte.
-      tenantId = this.tenantContext.tenantId ?? user.tenantId;
-      tenantCode = this.tenantContext.tenantCode;
+      // Utilisateur normal : le tenant est celui du COMPTE.
+      // Il ne peut jamais être imposé par le client (X-Tenant-Id,
+      // X-Tenant-Code, sous-domaine, ?tenantId=) : le contexte de requête est
+      // donc volontairement ignoré ici, sans quoi un attaquant obtiendrait un
+      // jeton portant le tenant d'un autre client en envoyant un simple
+      // en-tête sur la requête de connexion (cette route est @Public()).
+      tenantId = user.tenantId;
       if (!tenantId) {
         this.messageService.throwBusiness(
           MessageCode.AUTH_INVALID_CREDENTIALS,
           HttpStatus.UNAUTHORIZED,
         );
       }
+      // Code du tenant relu en base : le jeton ne peut pas porter un code
+      // choisi par le client.
+      tenantCode = (await this.tenantService.findById(tenantId))?.code ?? null;
       const result = await this.getUserRolesAndPermissions(user.id);
       roles = result.roles;
       permissions = result.permissions;

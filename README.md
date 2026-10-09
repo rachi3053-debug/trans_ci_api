@@ -217,6 +217,88 @@ supprimé définitivement** que par le ROOT lui-même. Les opérations sensibles
 (mot de passe, blocage) sont réservées au ROOT, à l'utilisateur concerné ou à un
 ADMIN. La création accepte un `tenantId` de destination **uniquement** pour ROOT.
 
+## Module Villes — référence globale
+
+Les villes (Abidjan, Bouaké, Yamoussoukro…) sont une **donnée de référence
+globale**, à l'instar du rôle `ROOT` : `tenant_id` est toujours `NULL` et la
+liste est partagée par tous les tenants, sans duplication. Aucune ville n'est
+donc filtrée par tenant, et le module n'accepte aucun `tenantId` du client.
+
+### Autorisation
+
+| Opération | Permission | Accès réel |
+|---|---|---|
+| `GET /villes`, `GET /villes/:id`, `GET /villes/deleted` | `VILLE:READ` | tout utilisateur authentifié |
+| `POST /villes` | `VILLE:CREATE` | **ROOT uniquement** |
+| `PUT /villes/:id` | `VILLE:UPDATE` | **ROOT uniquement** |
+| `DELETE /villes/:id` | `VILLE:DELETE` | **ROOT uniquement** |
+| `POST /villes/:id/restore` | `VILLE:UPDATE` | **ROOT uniquement** |
+
+L'écriture est verrouillée **dans le service** (`VilleService.assertGlobalReferenceWriter`),
+et pas seulement par l'annotation `@Permissions` : `PermissionGuard` court-circuite
+le ROOT sans vérifier les permissions, et une ville partagée par tous ne doit
+pouvoir être altérée par un seul tenant. Les permissions `VILLE:CREATE`,
+`VILLE:UPDATE` et `VILLE:DELETE` ne sont donc attribuées à aucun rôle ; seul
+`VILLE:READ` l'est, y compris à `CONSULTATION`.
+
+### Unicité
+
+`nom` et `code` sont uniques, **insensible à la casse** et aux espaces de bord.
+Le code est normalisé en majuscules par le service.
+
+La garantie réelle repose sur deux index uniques **fonctionnels** créés par la
+migration `1764000000000-CreateVilleTable` :
+
+```sql
+CREATE UNIQUE INDEX "IDX_villes_code_lower"
+  ON "villes" (LOWER("code")) WHERE "deleted_at" IS NULL;
+CREATE UNIQUE INDEX "IDX_villes_nom_lower"
+  ON "villes" (LOWER("nom"))  WHERE "deleted_at" IS NULL;
+```
+
+Les index sont **partiels sur `deleted_at IS NULL`**, et non sur
+`tenant_id IS NOT NULL` comme le font `roles` et `permissions` : `tenant_id` vaut
+toujours `null` ici, un index partiel sur cette colonne ne porterait aucune
+ligne.
+
+Le partiel sur `deleted_at` est indispensable : une ville supprimée conserve sa
+ligne en base, donc son `code` et son `nom`. Sans cette condition, un nom serait
+réservé définitivement et l'on ne pourrait plus recréer une ville `Abidjan` après
+l'avoir supprimée — ce qui viderait la corbeille de sa raison d'être.
+
+Conséquence assumée : une ville en corbeille et une ville active ne peuvent pas
+porter le même nom. Sans effet pratique, et préférable à un code bloqué.
+
+La vérification applicative (`assertNoDuplicate`) est un confort d'IH et peut
+être franchie par deux requêtes concurrentes ; en cas de violation PostgreSQL
+(`23505`) la réponse est un 409.
+
+### Routes
+
+| Méthode | Route | Description |
+|---|---|---|
+| `GET` | `/villes` | recherche paginée (`search`, `region`, `departement`, `actif`, pagination/tri) |
+| `GET` | `/villes/deleted` | corbeille |
+| `GET` | `/villes/:id` | détail |
+| `POST` | `/villes` | création (ROOT) |
+| `PUT` | `/villes/:id` | modification (ROOT) |
+| `DELETE` | `/villes/:id` | suppression logique (ROOT) |
+| `POST` | `/villes/:id/restore` | restauration (ROOT) |
+
+`GET /villes/deleted` est déclaré **avant** `GET /villes/:id`, sinon Express
+routerait `/villes/deleted` vers le détail.
+
+### Recherche
+
+`search` porte sur `nom`, `code`, `region`, `departement` (ILIKE). `region` et
+`departement` sont également filtrables en égalité, indépendamment.
+
+### Suppression
+
+Seule la **suppression logique** est exposée : une ville sera référencée par les
+modules métier (gares, trajets, chauffeurs). Pour retirer une ville des listes
+sans la supprimer, préférer `PUT /villes/:id { "actif": false }`.
+
 ## Conventions
 
 - La **source de vérité** des règles métier est le backend ; le front n'affiche et

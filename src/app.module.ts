@@ -9,6 +9,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { PermissionsModule } from './modules/permissions/permissions.module';
+import { VilleModule } from './modules/ville/ville.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { TenantModule } from './modules/tenants/tenants.module';
@@ -48,6 +49,7 @@ import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
     UsersModule,
     RolesModule,
     PermissionsModule,
+    VilleModule,
     ApiKeysModule,
   ],
   providers: [

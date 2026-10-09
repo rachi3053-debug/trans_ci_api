@@ -71,6 +71,15 @@ export const MESSAGES: Record<MessageCode, string> = {
   PERMISSION_ALREADY_EXISTS: 'Une permission avec ce code existe déjà.',
   PERMISSION_LIST: 'Liste des permissions récupérée avec succès.',
 
+  // Villes (référence globale)
+  VILLE_CREATED: 'Ville créée avec succès.',
+  VILLE_UPDATED: 'Ville modifiée avec succès.',
+  VILLE_DELETED: 'Ville supprimée avec succès.',
+  VILLE_RESTORED: 'Ville restaurée avec succès.',
+  VILLE_NOT_FOUND: 'Ville introuvable.',
+  VILLE_ALREADY_EXISTS: 'Une ville avec ce nom ou ce code existe déjà.',
+  VILLE_LIST: 'Liste des villes récupérée avec succès.',
+
   // API Keys
   API_KEY_CREATED: 'Clé API créée avec succès.',
   API_KEY_REVOKED: 'Clé API révoquée avec succès.',
